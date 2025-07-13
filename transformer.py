@@ -21,9 +21,9 @@ def normalize_json_keys(obj):
     if isinstance(obj, dict):
         return {normalize_key(k): v for k, v in obj.items()}
     return obj
-
+#do not forget to change the URL, despite being local it could point to structural leak
 def chamar_ia(texto):
-    url = "http://localhost:11434/api/generate"
+    url = "INSERT_URL_HERE"
     prompt = (
         "Você é um extrator de dados de nota fiscal. Analise o texto e extraia APENAS os valores numéricos correspondentes a cada campo.\n"
         "Retorne APENAS um JSON válido com os campos encontrados:\n"
