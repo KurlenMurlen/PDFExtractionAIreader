@@ -1,0 +1,13 @@
+{
+  "version": "0.2.0",
+  "configurations": [
+    {
+      "name": "C/C++ Runner: Debug Session",
+      "type": "lldb",
+      "request": "launch",
+      "args": [],
+      "cwd": "/Users/tarsobertolini/Desktop/PDFExtractionAIreader",
+      "program": "/Users/tarsobertolini/Desktop/PDFExtractionAIreader/build/Debug/outDebug"
+    }
+  ]
+}

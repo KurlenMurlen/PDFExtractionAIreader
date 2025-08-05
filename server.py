@@ -4,8 +4,7 @@ from werkzeug.utils import secure_filename
 import json
 import requests
 import re
-import base64
-import fitz  # PyMuPDF
+import pdfplumber
 
 # Configurações
 UPLOAD_FOLDER = 'entrada'
@@ -18,35 +17,84 @@ os.makedirs(OUTPUT_FOLDER, exist_ok=True)
 app = Flask(__name__)
 app.config['UPLOAD_FOLDER'] = UPLOAD_FOLDER
 
-def processar_pdf_com_visao(pdf_path):
-    """Processa PDF usando apenas visão computacional"""
+def processar_pdf_com_pdfplumber(pdf_path):
+    """Processa PDF usando pdfplumber para extração estruturada"""
     print(f"🚀 Processando: {pdf_path}")
     
-    # 1. Converter PDF para imagem
-    print("🖼️ Convertendo PDF para imagem...")
-    doc = fitz.open(pdf_path)
-    page = doc[0]  # Primeira página
-    mat = fitz.Matrix(2.0, 2.0)  # 200% zoom para melhor qualidade
-    pix = page.get_pixmap(matrix=mat)
-    img_data = pix.tobytes("png")
-    doc.close()
+    # 1. Extrair texto e tabelas com pdfplumber
+    print("📋 Extraindo texto e tabelas com pdfplumber...")
+    try:
+        with pdfplumber.open(pdf_path) as pdf:
+            page = pdf.pages[0]  # Primeira página
+            
+            # Extrair texto principal
+            text = page.extract_text()
+            
+            # Extrair tabelas
+            tables = page.extract_tables()
+            
+            # Montar texto estruturado
+            structured_text = f"=== CABEÇALHO DO HOLERITE ===\n{text}\n\n"
+            
+            if tables:
+                structured_text += "=== TABELAS DE VALORES ===\n"
+                for i, table in enumerate(tables):
+                    structured_text += f"\nTabela {i+1}:\n"
+                    for row_idx, row in enumerate(table):
+                        if row and any(cell for cell in row if cell):  # Linha não vazia
+                            # Formatar linha de forma estruturada
+                            cells = [str(cell).strip() if cell else "" for cell in row]
+                            structured_text += f"Linha {row_idx+1}: {' | '.join(cells)}\n"
+            
+            print(f"✅ Texto estruturado extraído ({len(structured_text)} caracteres)")
+            print(f"📊 Encontradas {len(tables)} tabelas")
+            
+    except Exception as e:
+        raise Exception(f"Erro ao extrair PDF com pdfplumber: {str(e)}")
     
-    # 2. Codificar imagem em base64
-    img_base64 = base64.b64encode(img_data).decode()
-    print(f"✅ Imagem convertida ({len(img_base64)} caracteres)")
-    
-    # 3. Configurar prompt
-    prompt = """
-    Analise este holerite/folha de pagamento e extraia TODOS os dados em JSON estruturado.
+    # 2. Configurar prompt otimizado para texto estruturado
+    prompt = f"""
+    Analise este holerite/folha de pagamento extraído de forma estruturada e extraia TODOS os dados em JSON.
 
-    INSTRUÇÕES:
-    1. Encontre cada campo pelo nome (SALARIO, PTS, BOG, INSS, etc.)
-    2. Para campos com duas colunas de valores, extraia ambas
-    3. Use formato decimal: 1234.56 (ponto para decimal)
-    4. Se não encontrar, deixe vazio
+    DADOS DO HOLERITE:
+    {structured_text}
+
+    INSTRUÇÕES ESPECÍFICAS:
+    1. No cabeçalho, encontre: NOME, MATRÍCULA, FUNÇÃO, PERÍODO, EMPRESA
     
-    RETORNE APENAS ESTE JSON:
-    {
+    2. Nas tabelas, IGNORE os códigos numéricos (101, 171, 314, 401, 405, 410, 422, 424, 461, 564, 574, etc.) 
+       que são apenas identificadores. Procure pelos VALORES MONETÁRIOS que vêm após as descrições:
+       
+       - SALARIO + valores monetários
+       - PTS + valores monetários  
+       - BOG + valores monetários
+       - INSS + valores monetários
+       - IMPOSTO DE RENDA/IRRF + valores monetários
+       - ADIANT/ADIANTAMENTO + valores monetários
+       - VALE REFEICAO/DESC VALE REFEICAO + valores monetários
+       - ODONTO/PL ODONTO + valores monetários
+       - PLANO SAUDE/COPART PLANO SAUDE + valores monetários
+       - COMBUSTIVEL/DESC COMBUSTIVEL + valores monetários
+       
+    3. Procure por TOTAL BRUTO, TOTAL DESCONTOS, LÍQUIDO A RECEBER
+    
+    4. Para cada item que tem múltiplos valores numéricos, extraia:
+       - COL1: primeiro valor (geralmente quantidade/horas)
+       - COL2: segundo valor (geralmente valor monetário)
+       
+    5. IMPORTANTE: Números como 101, 171, 314, 401, 405, 410, 422, 424, 461, 564, 574 são CÓDIGOS,
+       NÃO valores monetários. Ignore-os completamente.
+       
+    6. Use formato decimal: 1234.56 (converter vírgulas para pontos)
+    7. Se não encontrar, deixe vazio ""
+    
+    EXEMPLO de como interpretar:
+    "101 SALARIO 30.00 5.113,34" → SALARIO_COL1="30.00", SALARIO_COL2="5113.34"
+    "171 PTS(1) 1.73 50,00" → PTS_COL1="1.73", PTS_COL2="50.00"
+    "401 INSS 0.00 620,36" → INSS_COL1="0.00", INSS_COL2="620.36"
+    
+    RETORNE APENAS ESTE JSON (sem explicações):
+    {{
       "NOME": "",
       "MATRICULA": "",
       "FUNCAO": "",
@@ -75,49 +123,59 @@ def processar_pdf_com_visao(pdf_path):
       "TOTAL_BRUTO": "",
       "TOTAL_DESCONTOS": "",
       "VALOR_LIQUIDO": ""
-    }
+    }}
     """
     
-    # 4. Processar com modelo de visão
-    print("🤖 Processando com LLaVA 13B...")
+    # 3. Processar com Mistral via Ollama
+    print("🤖 Processando com Mistral...")
     url = "http://localhost:11434/api/generate"
     
     payload = {
-        "model": "llava:13b",
+        "model": "mistral",
         "prompt": prompt,
-        "images": [img_base64],
         "stream": False,
         "options": {
             "temperature": 0.1,
-            "num_predict": 1500,
+            "num_predict": 2000,
             "stop": ["}"]
         }
     }
     
-    response = requests.post(url, json=payload, timeout=1800)  # 30 min
-    
-    if response.status_code != 200:
-        raise Exception(f"Erro HTTP {response.status_code}: {response.text}")
-    
-    # 5. Extrair e processar resultado
-    resposta = response.json()
-    content = resposta['response'] + "}"  # Adiciona } caso tenha sido cortado
-    
-    # 6. Extrair JSON da resposta
-    json_blocks = re.findall(r'\{[\s\S]*?\}', content, re.DOTALL)
-    if not json_blocks:
-        raise Exception(f"Nenhum JSON encontrado na resposta")
-    
-    # 7. Tentar cada bloco JSON encontrado
-    for block in json_blocks:
-        try:
-            obj = json.loads(block)
-            print(f"✅ LLaVA extraiu {len(obj)} campos!")
-            return obj
-        except:
-            continue
-            
-    raise Exception("Não foi possível extrair JSON válido")
+    try:
+        response = requests.post(url, json=payload, timeout=300)  # 5 min
+        
+        if response.status_code != 200:
+            raise Exception(f"Erro HTTP {response.status_code}: {response.text}")
+        
+        # 4. Extrair e processar resultado
+        resposta = response.json()
+        content = resposta['response']
+        
+        # Garantir que o JSON termine com }
+        if not content.strip().endswith('}'):
+            content += "}"
+        
+        print(f"📦 Resposta do Mistral: {content[:200]}...")
+        
+        # 5. Extrair JSON da resposta
+        json_blocks = re.findall(r'\{[\s\S]*?\}', content, re.DOTALL)
+        if not json_blocks:
+            raise Exception(f"Nenhum JSON encontrado na resposta: {content}")
+        
+        # 6. Tentar cada bloco JSON encontrado
+        for block in json_blocks:
+            try:
+                obj = json.loads(block)
+                print(f"✅ Mistral extraiu {len(obj)} campos!")
+                return obj
+            except json.JSONDecodeError as e:
+                print(f"⚠️ Erro ao parsear JSON: {e}")
+                continue
+                
+        raise Exception("Não foi possível extrair JSON válido da resposta")
+        
+    except requests.exceptions.RequestException as e:
+        raise Exception(f"Erro na comunicação com Ollama: {str(e)}")
 
 def salvar_resultado(nome_arquivo, dados):
     """Salva os resultados em JSON"""
@@ -144,9 +202,9 @@ def upload_file():
             file.save(pdf_path)
             pdf_url = url_for('uploaded_file', filename=filename)
             
-            # Processa o PDF com visão computacional
+            # Processa o PDF com pdfplumber (extração estruturada)
             try:
-                json_data = processar_pdf_com_visao(pdf_path)
+                json_data = processar_pdf_com_pdfplumber(pdf_path)
                 salvar_resultado(filename, json_data)
             except Exception as e:
                 json_data = {"Erro": f"Erro ao processar o PDF: {str(e)}"}
@@ -186,7 +244,7 @@ HTML = """
 <body>
     <div class="container">
         <div class="upload-section">
-            <h2>Leitor Inteligente de Holerite PDF</h2>
+            <h2>Leitor Inteligente de Holerite PDF (com PDFPlumber + Mistral)</h2>
             <form method=post enctype=multipart/form-data>
                 <input type=file name=file accept="application/pdf" style="margin-right: 10px;">
                 <input type=submit value="Enviar e Processar" style="background: #007bff; color: white; padding: 8px 16px; border: none; border-radius: 4px; cursor: pointer;">
